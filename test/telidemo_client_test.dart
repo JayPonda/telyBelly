@@ -18,14 +18,17 @@ void main() {
       expect(client.credentials.apiHash, 'abcde');
     });
 
-    test('credentials can be updated via setters', () {
+    test('credentials can be updated', () {
       client.credentials.apiId = 67890;
       expect(client.credentials.apiId, 67890);
     });
 
-    test('phoneNumber can be set and retrieved', () {
-      client.credentials.phoneNumber = '+987654321';
-      expect(client.credentials.phoneNumber, '+987654321');
+    test('phone number components can be set and retrieved', () {
+      client.credentials.countryCode = '91';
+      client.credentials.phoneNumber = '9876543210';
+      expect(client.credentials.countryCode, '91');
+      expect(client.credentials.phoneNumber, '9876543210');
+      expect(client.credentials.fullPhoneNumber, '+919876543210');
     });
 
     test('rawClient is null before init', () {
@@ -36,31 +39,40 @@ void main() {
       test('validateApiCredentials accepts valid API ID and Hash', () {
         credentials.apiId = 1234567;
         credentials.apiHash = 'a' * 32;
-        expect(() => client.validateApiCredentials(), returnsNormally);
+        expect(() => credentials.validateApiCredentials(), returnsNormally);
       });
 
       test('validateApiCredentials throws ArgumentError for invalid API ID', () {
         credentials.apiId = 123;
-        expect(() => client.validateApiCredentials(), throwsArgumentError);
+        expect(() => credentials.validateApiCredentials(), throwsArgumentError);
       });
 
       test('validateApiCredentials throws ArgumentError for invalid API Hash', () {
         credentials.apiId = 1234567;
         credentials.apiHash = 'short';
-        expect(() => client.validateApiCredentials(), throwsArgumentError);
+        expect(() => credentials.validateApiCredentials(), throwsArgumentError);
       });
 
-      test('validatePhoneNumber accepts valid phone number', () {
-        credentials.phoneNumber = '+919876543210';
-        expect(() => client.validatePhoneNumber(), returnsNormally);
+      test('validatePhoneNumber accepts valid phone number components', () {
+        credentials.countryCode = '91';
+        credentials.phoneNumber = '9876543210';
+        expect(() => credentials.validatePhoneNumber(), returnsNormally);
       });
 
-      test('validatePhoneNumber throws ArgumentError for invalid phone number', () {
-        credentials.phoneNumber = '919876543210'; // missing +
-        expect(() => client.validatePhoneNumber(), throwsArgumentError);
+      test('validatePhoneNumber throws ArgumentError for missing components', () {
+        credentials.countryCode = null;
+        credentials.phoneNumber = '9876543210';
+        expect(() => credentials.validatePhoneNumber(), throwsArgumentError);
         
-        credentials.phoneNumber = '+12345'; // too short
-        expect(() => client.validatePhoneNumber(), throwsArgumentError);
+        credentials.countryCode = '91';
+        credentials.phoneNumber = null;
+        expect(() => credentials.validatePhoneNumber(), throwsArgumentError);
+      });
+
+      test('validatePhoneNumber throws ArgumentError for invalid length', () {
+        credentials.countryCode = '1';
+        credentials.phoneNumber = '23'; // too short
+        expect(() => credentials.validatePhoneNumber(), throwsArgumentError);
       });
     });
 

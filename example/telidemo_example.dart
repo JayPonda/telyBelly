@@ -1,6 +1,7 @@
 import 'dart:io';
-import 'package:telidemo/telidemo.dart';
+
 import 'package:t/t.dart' as t;
+import 'package:telidemo/telidemo.dart';
 
 /// A custom credentials class that saves/loads session data from a local file.
 class PersistentCredentials extends TeliDemoCredentials {
@@ -30,7 +31,6 @@ void main() async {
   print('--- TeliDemo Persistent Userbot ---');
 
   // 1. Setup API Credentials (Interactive for first time)
-  // In a real app, these could be hardcoded or from .env
   stdout.write('Enter your API ID: ');
   final apiIdInput = stdin.readLineSync();
   stdout.write('Enter your API Hash: ');
@@ -51,15 +51,21 @@ void main() async {
   client.onBeforeAuth = () {
     print('\n[Step 1] Credentials validated. Connecting to Telegram...');
 
-    // Prompt for phone number if not already stored
+    // Prompt for phone number components if not already stored
+    if (credentials.countryCode == null) {
+      stdout.write('Enter Country Code (e.g., 91): ');
+      credentials.countryCode = stdin.readLineSync();
+    }
+
     if (credentials.phoneNumber == null) {
-      stdout.write('Enter your Phone Number (e.g., +919876543210): ');
+      stdout.write('Enter Phone Number (e.g., 9876543210): ');
       credentials.phoneNumber = stdin.readLineSync();
     }
   };
 
   client.onGetOtp = () async {
-    stdout.write('\n[Step 2] OTP Sent! Enter the code you received: ');
+    stdout.write('\n[Step 2] OTP Sent to ${credentials.fullPhoneNumber}! '
+        'Enter the code you received: ');
     final otp = stdin.readLineSync() ?? '';
     return otp;
   };
@@ -98,6 +104,7 @@ void main() async {
     await client.login();
 
     print('\nUserbot is active. Listening for messages... (Ctrl+C to stop)');
+    // Keep the process alive
     await Future.delayed(const Duration(days: 1));
   } catch (e) {
     print('\nInitialization Error: $e');
