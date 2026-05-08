@@ -141,12 +141,70 @@ void main() async {
       }
 
       if (chats.isNotEmpty) {
-        print('\n[Data] Subscribed Channels and Chats:');
-        for (final chat in chats) {
+        print('\n[Data] Subscribed Channels and Chats (Detailed List):');
+        for (var i = 0; i < chats.length; i++) {
+          final chat = chats[i];
+          String title = 'Unknown';
+          int id = 0;
+          String type = 'Unknown';
+
           if (chat is t.Chat) {
-            print('  • [Chat]    ${chat.title}');
+            title = chat.title;
+            id = chat.id;
+            type = 'Chat';
           } else if (chat is t.Channel) {
-            print('  • [Channel] ${chat.title}');
+            title = chat.title;
+            id = chat.id;
+            type = 'Channel';
+          } else if (chat is t.ChatForbidden) {
+            title = chat.title;
+            id = chat.id;
+            type = 'ChatForbidden';
+          } else if (chat is t.ChannelForbidden) {
+            title = chat.title;
+            id = chat.id;
+            type = 'ChannelForbidden';
+          }
+
+          print('  [$i] [$type] $title (ID: $id)');
+        }
+
+        stdout.write('\nEnter the index [0-${chats.length - 1}] to view messages (or enter to skip): ');
+        final indexInput = stdin.readLineSync();
+        if (indexInput != null && indexInput.isNotEmpty) {
+          final index = int.tryParse(indexInput);
+          if (index != null && index >= 0 && index < chats.length) {
+            final selectedChat = chats[index];
+            String selectedTitle = 'Unknown';
+            if (selectedChat is t.Chat) selectedTitle = selectedChat.title;
+            if (selectedChat is t.Channel) selectedTitle = selectedChat.title;
+
+            print('\n[Action] Fetching messages for: $selectedTitle...');
+            
+            final msgResponse = await client.getMessages(selectedChat, limit: 5);
+            
+            if (msgResponse.error == null) {
+              final msgResult = msgResponse.result;
+              List<t.MessageBase> messages = [];
+              if (msgResult is t.MessagesMessages) {
+                messages = msgResult.messages;
+              } else if (msgResult is t.MessagesMessagesSlice) {
+                messages = msgResult.messages;
+              } else if (msgResult is t.MessagesChannelMessages) {
+                messages = msgResult.messages;
+              }
+
+              print('\n[Data] Latest 5 Messages:');
+              for (final msg in messages) {
+                if (msg is t.Message) {
+                  print('  - [${msg.date}] ${msg.message}');
+                } else if (msg is t.MessageService) {
+                  print('  - [${msg.date}] Service Message');
+                }
+              }
+            } else {
+              print('[Error] Failed to fetch messages: ${msgResponse.error?.errorMessage}');
+            }
           }
         }
       } else {

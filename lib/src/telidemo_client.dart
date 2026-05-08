@@ -301,6 +301,45 @@ final class TeliDemoClient {
     );
   }
 
+  /// Retrieves the latest messages from a specific chat or channel.
+  ///
+  /// [chat] is the chat/channel object retrieved from [getSubscribedChannels].
+  /// [limit] is the number of messages to retrieve (default 10).
+  Future<t.Result<t.MessagesMessagesBase>> getMessages(
+    t.ChatBase chat, {
+    int limit = 10,
+  }) async {
+    final client = _client;
+    if (client == null) {
+      throw StateError('Client not initialized. Call login() first.');
+    }
+
+    t.InputPeerBase peer;
+    if (chat is t.Channel) {
+      if (chat.accessHash == null) {
+        throw ArgumentError('Channel access hash is missing. Cannot fetch messages.');
+      }
+      peer = t.InputPeerChannel(channelId: chat.id, accessHash: chat.accessHash!);
+    } else if (chat is t.Chat) {
+      peer = t.InputPeerChat(chatId: chat.id);
+    } else {
+      throw ArgumentError('Unsupported chat type: ${chat.runtimeType}');
+    }
+
+    final response = await client.messages.getHistory(
+      peer: peer,
+      offsetId: 0,
+      offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+      addOffset: 0,
+      limit: limit,
+      maxId: 0,
+      minId: 0,
+      hash: 0,
+    );
+
+    return response;
+  }
+
   /// Retrieves message history for a specific chat.
   Future<dynamic> getChatHistory(
     t.InputPeerBase peer, {
