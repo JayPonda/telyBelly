@@ -25,38 +25,57 @@ class PersistentCredentials extends TeliDemoCredentials {
       _sessionFile.deleteSync();
     }
   }
+
+  bool get hasSession => _sessionFile.existsSync();
 }
 
 void main() async {
-  print('--- TeliDemo Persistent Userbot ---');
+  print('--- TeliDemo Standalone Tool ---');
 
-  // 1. Setup API Credentials (Interactive for first time)
-  stdout.write('Enter your API ID: ');
-  final apiIdInput = stdin.readLineSync();
-  stdout.write('Enter your API Hash: ');
-  final apiHashInput = stdin.readLineSync();
+  // 1. Setup API Credentials
+  final sessionExists = File('session.json').existsSync();
 
-  if (apiIdInput == null || apiHashInput == null) return;
+  int? apiId;
+  String? apiHash;
+
+  if (!sessionExists) {
+    stdout.write('Enter your API ID: ');
+    final apiIdInput = stdin.readLineSync();
+    stdout.write('Enter your API Hash: ');
+    final apiHashInput = stdin.readLineSync();
+
+    if (apiIdInput == null || apiHashInput == null) return;
+    apiId = int.tryParse(apiIdInput);
+    apiHash = apiHashInput;
+  } else {
+    stdout.write('Enter your API ID (required to resume session): ');
+    apiId = int.tryParse(stdin.readLineSync() ?? '');
+    stdout.write('Enter your API Hash: ');
+    apiHash = stdin.readLineSync();
+  }
+
+  if (apiId == null || apiHash == null) {
+    print('Error: API ID and Hash are required.');
+    return;
+  }
 
   final credentials = PersistentCredentials(
-    apiId: int.parse(apiIdInput),
-    apiHash: apiHashInput,
+    apiId: apiId,
+    apiHash: apiHash,
   );
 
   // 2. Setup Client
   final client = TeliDemoClient(credentials);
 
-  // --- Register Callbacks ---
+  // --- Register Callbacks for Auth ---
 
-  client.onBeforeAuth = () {
-    print('\n[Step 1] Credentials validated. Connecting to Telegram...');
-
-    // Prompt for phone number components if not already stored
+  client.onAuthRequired = () {
+    print('\n[Notice] No active session found. Authentication required.');
+    
     if (credentials.countryCode == null) {
       stdout.write('Enter Country Code (e.g., 91): ');
       credentials.countryCode = stdin.readLineSync();
     }
-
     if (credentials.phoneNumber == null) {
       stdout.write('Enter Phone Number (e.g., 9876543210): ');
       credentials.phoneNumber = stdin.readLineSync();
@@ -64,49 +83,76 @@ void main() async {
   };
 
   client.onGetOtp = () async {
-    stdout.write('\n[Step 2] OTP Sent to ${credentials.fullPhoneNumber}! '
-        'Enter the code you received: ');
-    final otp = stdin.readLineSync() ?? '';
-    return otp;
+    stdout.write('\nEnter OTP code: ');
+    return stdin.readLineSync() ?? '';
   };
 
   client.onGetPassword = (hint) async {
-    stdout.write('\n[Step 2FA] Password required (Hint: $hint): ');
-    final password = stdin.readLineSync() ?? '';
-    return password;
+    stdout.write('\nEnter 2FA Password (Hint: $hint): ');
+    return stdin.readLineSync() ?? '';
   };
 
   client.onAuthResult = (result) {
     if (result.success) {
-      print('\n[Result] Login Successful! Welcome.');
+      print('\n[Success] ${result.message ?? "Logged in."}');
     } else {
-      print('\n[Result] Login Failed: ${result.message}');
-      exit(1);
+      print('\n[Error] ${result.message}');
     }
   };
 
-  // Setup listener for real-time messages
-  client.onUpdate((data) {
-    if (data is t.Updates) {
-      for (final update in data.updates) {
-        if (update is t.UpdateNewMessage) {
-          final msg = update.message;
-          if (msg is t.Message) {
-            print('\n>> New Message: ${msg.message}');
+  // 3. Execution Flow
+  try {
+    print('\n[Action] Initiating connection and login...');
+    final loginResult = await client.login();
+    
+    if (!loginResult.success) {
+      print('[Status] Login failed. Cleaning up session data.');
+      // Clear invalid session data so next try is clean
+      credentials.sessionData = null;
+      await client.close();
+      exit(1);
+    }
+    
+    print('[Status] Login process finished successfully.');
+
+    // 4. Perform Standalone Task: Get Subscribed Channels
+    print('\n[Action] Requesting subscribed channels (Standalone API Request)...');
+    final response = await client.getSubscribedChannels();
+
+    if (response.error == null) {
+      final result = response.result;
+      List<t.ChatBase> chats = [];
+      
+      if (result is t.MessagesDialogs) {
+        chats = result.chats;
+      } else if (result is t.MessagesDialogsSlice) {
+        chats = result.chats;
+      }
+
+      if (chats.isNotEmpty) {
+        print('\n[Data] Successfully retrieved ${chats.length} channels/chats:');
+        for (final chat in chats) {
+          if (chat is t.Chat) {
+            print('  - [Chat] ${chat.title}');
+          } else if (chat is t.Channel) {
+            print('  - [Channel] ${chat.title}');
           }
         }
+      } else {
+        print('\n[Data] No channels found.');
       }
+    } else {
+      print('\n[Error] Failed to fetch channels: ${response.error?.errorMessage}');
     }
-  });
 
-  // 3. Run the automated flow
-  try {
-    await client.login();
-
-    print('\nUserbot is active. Listening for messages... (Ctrl+C to stop)');
-    // Keep the process alive
-    await Future.delayed(const Duration(days: 1));
+    // 5. Cleanup
+    print('\n[Action] Standalone task finished. Closing connection...');
+    await client.close();
+    print('[Status] Done.');
+    exit(0);
   } catch (e) {
-    print('\nInitialization Error: $e');
+    print('\n[Fatal Error] $e');
+    await client.close();
+    exit(1);
   }
 }

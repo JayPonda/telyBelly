@@ -8,3 +8,5 @@ pubspec.lock
 
 .agents
 tg
+t
+session.json

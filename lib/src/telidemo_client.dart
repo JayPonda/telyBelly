@@ -30,16 +30,16 @@ class AuthResult {
 /// A high-level Telegram client with an automated authentication flow.
 ///
 /// This client wraps [tg.Client] and provides a simplified interface for
-/// connecting, authenticating (including OTP and 2FA), and interacting with
-/// the Telegram API.
+/// connecting, authenticating, and interacting with the Telegram API.
 final class TeliDemoClient {
   tg.Client? _client;
+  TeliDemoSocket? _teliSocket;
   final TeliDemoCredentials credentials;
   final StreamController<dynamic> _updateController =
       StreamController<dynamic>.broadcast();
 
-  /// Callback triggered before the authentication process starts.
-  FutureOr<void> Function()? onBeforeAuth;
+  /// Callback triggered only when a new authentication process (OTP/2FA) is about to start.
+  FutureOr<void> Function()? onAuthRequired;
 
   /// Callback used to retrieve the OTP code from the user.
   Future<String> Function()? onGetOtp;
@@ -62,97 +62,101 @@ final class TeliDemoClient {
 
   /// Initializes the client and starts the automated login flow.
   ///
-  /// This method performs the following steps:
-  /// 1. Validates API credentials.
-  /// 2. Connects to the Telegram server.
-  /// 3. Performs the Diffie-Hellman handshake or resumes a session.
-  /// 4. Initializes the connection.
-  /// 5. Checks if the user is already signed in.
-  /// 6. If not signed in, starts the OTP authentication flow.
-  Future<void> login({
+  /// Returns an [AuthResult] indicating the outcome of the login process.
+  Future<AuthResult> login({
     String ip = '91.108.56.130',
     int port = 443,
     int dcId = 5,
   }) async {
-    credentials.validateApiCredentials();
-
-    if (onBeforeAuth != null) {
-      await onBeforeAuth!();
-    }
-
-    final socket = await Socket.connect(ip, port);
-    final teliSocket = TeliDemoSocket(socket);
-    final obfuscation = tg.Obfuscation.random(false, dcId);
-    final idGenerator = tg.MessageIdGenerator();
-
-    await teliSocket.send(obfuscation.preamble);
-
-    tg.AuthorizationKey? authKey;
-    final session = credentials.sessionData;
-    if (session != null && session.isNotEmpty) {
-      try {
-        authKey = tg.AuthorizationKey.fromJson(
-          jsonDecode(session) as Map<String, dynamic>,
-        );
-      } catch (e) {
-        // Fallback to DH exchange if session is invalid
-      }
-    }
-
-    if (authKey == null) {
-      authKey = await tg.Client.authorize(
-        teliSocket,
-        obfuscation,
-        idGenerator,
-      );
-      credentials.sessionData = jsonEncode(authKey.toJson());
-    }
-
-    _client = tg.Client(
-      socket: teliSocket,
-      obfuscation: obfuscation,
-      authorizationKey: authKey,
-      idGenerator: idGenerator,
-    );
-
-    _client!.stream.listen((event) {
-      _updateController.add(event);
-    });
-
-    await _client!.initConnection<t.Config>(
-      apiId: credentials.apiId,
-      deviceModel: 'Desktop',
-      systemVersion: 'Unknown',
-      appVersion: '1.0.0',
-      systemLangCode: 'en',
-      langPack: '',
-      langCode: 'en',
-      query: const t.HelpGetConfig(),
-    );
-
-    bool alreadySignedIn = false;
     try {
-      final userResponse = await _client!.users.getUsers(
-        id: [const t.InputUserSelf()],
+      credentials.validateApiCredentials();
+
+      final socket = await Socket.connect(ip, port);
+      _teliSocket = TeliDemoSocket(socket);
+      final obfuscation = tg.Obfuscation.random(false, dcId);
+      final idGenerator = tg.MessageIdGenerator();
+
+      await _teliSocket!.send(obfuscation.preamble);
+
+      tg.AuthorizationKey? authKey;
+      final session = credentials.sessionData;
+      if (session != null && session.isNotEmpty) {
+        try {
+          authKey = tg.AuthorizationKey.fromJson(
+            jsonDecode(session) as Map<String, dynamic>,
+          );
+        } catch (e) {
+          // Fallback to DH exchange if session is invalid
+        }
+      }
+
+      if (authKey == null) {
+        authKey = await tg.Client.authorize(
+          _teliSocket!,
+          obfuscation,
+          idGenerator,
+        );
+        credentials.sessionData = jsonEncode(authKey.toJson());
+      }
+
+      _client = tg.Client(
+        socket: _teliSocket!,
+        obfuscation: obfuscation,
+        authorizationKey: authKey,
+        idGenerator: idGenerator,
       );
-      if (userResponse.result is List &&
-          (userResponse.result as List).isNotEmpty) {
-        alreadySignedIn = true;
+
+      _client!.stream.listen((event) {
+        _updateController.add(event);
+      });
+
+      await _client!.initConnection<t.Config>(
+        apiId: credentials.apiId,
+        deviceModel: 'Desktop',
+        systemVersion: 'Unknown',
+        appVersion: '1.0.0',
+        systemLangCode: 'en',
+        langPack: '',
+        langCode: 'en',
+        query: const t.HelpGetConfig(),
+      );
+
+      bool alreadySignedIn = false;
+      try {
+        final userResponse = await _client!.users.getUsers(
+          id: [const t.InputUserSelf()],
+        );
+        if (userResponse.result is t.Vector &&
+            (userResponse.result as t.Vector).items.isNotEmpty) {
+          alreadySignedIn = true;
+        }
+      } catch (e) {
+        if (e.toString().contains('AUTH_KEY_UNREGISTERED') ||
+            e.toString().contains('AUTH_RESTART')) {
+          credentials.sessionData = null;
+          _teliSocket?.close();
+          return login(ip: ip, port: port, dcId: dcId);
+        }
+      }
+
+      if (alreadySignedIn) {
+        final res = const AuthResult(success: true, message: 'Session resumed.');
+        onAuthResult?.call(res);
+        return res;
+      } else {
+        if (onAuthRequired != null) {
+          await onAuthRequired!();
+        }
+        return await _startOtpFlow();
       }
     } catch (e) {
-      // Not signed in
-    }
-
-    if (alreadySignedIn) {
-      onAuthResult?.call(
-        const AuthResult(success: true, message: 'Session resumed.'),
-      );
-    } else {
-      await _startOtpFlow();
+      final res = AuthResult(success: false, message: e.toString());
+      onAuthResult?.call(res);
+      return res;
     }
   }
 
-  Future<void> _startOtpFlow() async {
+  Future<AuthResult> _startOtpFlow() async {
     try {
       final fullPhone = credentials.validatePhoneNumber();
 
@@ -171,10 +175,12 @@ final class TeliDemoClient {
       );
 
       if (response.error != null) {
-        onAuthResult?.call(
-          AuthResult(success: false, message: response.error!.errorMessage),
+        final res = AuthResult(
+          success: false,
+          message: response.error!.errorMessage,
         );
-        return;
+        onAuthResult?.call(res);
+        return res;
       }
 
       final sentCode = response.result as t.AuthSentCode;
@@ -193,39 +199,40 @@ final class TeliDemoClient {
 
       if (signInResponse.error != null) {
         if (signInResponse.error!.errorMessage == 'SESSION_PASSWORD_NEEDED') {
-          await _handle2FA();
+          return await _handle2FA();
         } else {
-          onAuthResult?.call(
-            AuthResult(
-              success: false,
-              message: signInResponse.error!.errorMessage,
-            ),
+          final res = AuthResult(
+            success: false,
+            message: signInResponse.error!.errorMessage,
           );
+          onAuthResult?.call(res);
+          return res;
         }
       } else {
-        onAuthResult?.call(
-          AuthResult(success: true, data: signInResponse.result),
-        );
+        final res = AuthResult(success: true, data: signInResponse.result);
+        onAuthResult?.call(res);
+        return res;
       }
     } catch (e) {
-      onAuthResult?.call(AuthResult(success: false, message: e.toString()));
+      final res = AuthResult(success: false, message: e.toString());
+      onAuthResult?.call(res);
+      return res;
     }
   }
 
-  Future<void> _handle2FA() async {
+  Future<AuthResult> _handle2FA() async {
     final accountPasswordResponse = await _client!.account.getPassword();
     if (accountPasswordResponse.result is t.AccountPassword) {
       final accountPassword =
           accountPasswordResponse.result as t.AccountPassword;
 
       if (onGetPassword == null) {
-        onAuthResult?.call(
-          const AuthResult(
-            success: false,
-            message: '2FA required but onGetPassword callback not provided.',
-          ),
+        final res = const AuthResult(
+          success: false,
+          message: '2FA required but onGetPassword callback not provided.',
         );
-        return;
+        onAuthResult?.call(res);
+        return res;
       }
 
       final password = await onGetPassword!(accountPassword.hint ?? '');
@@ -234,18 +241,19 @@ final class TeliDemoClient {
           await _client!.auth.checkPassword(password: srp);
 
       if (checkPasswordResponse.error != null) {
-        onAuthResult?.call(
-          AuthResult(
-            success: false,
-            message: checkPasswordResponse.error!.errorMessage,
-          ),
+        final res = AuthResult(
+          success: false,
+          message: checkPasswordResponse.error!.errorMessage,
         );
+        onAuthResult?.call(res);
+        return res;
       } else {
-        onAuthResult?.call(
-          AuthResult(success: true, data: checkPasswordResponse.result),
-        );
+        final res = AuthResult(success: true, data: checkPasswordResponse.result);
+        onAuthResult?.call(res);
+        return res;
       }
     }
+    return const AuthResult(success: false, message: 'Failed to retrieve 2FA details.');
   }
 
   /// Listens for updates from the Telegram server.
@@ -256,8 +264,6 @@ final class TeliDemoClient {
   }
 
   /// Invokes a raw Telegram method (RPC call).
-  ///
-  /// Throws a [StateError] if the client is not initialized.
   Future<dynamic> invoke(t.TlMethod method) async {
     final client = _client;
     if (client == null) {
@@ -266,11 +272,24 @@ final class TeliDemoClient {
     return await client.invoke(method);
   }
 
+  /// Retrieves a list of all channels and chats the user is subscribed to.
+  Future<t.Result<t.MessagesDialogsBase>> getSubscribedChannels() async {
+    final client = _client;
+    if (client == null) {
+      throw StateError('Client not initialized. Call login() first.');
+    }
+
+    return await client.messages.getDialogs(
+      excludePinned: false,
+      offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+      offsetId: 0,
+      offsetPeer: const t.InputPeerEmpty(),
+      limit: 100,
+      hash: 0,
+    );
+  }
+
   /// Retrieves message history for a specific chat.
-  ///
-  /// [peer] is the chat to retrieve history from.
-  /// [offsetId] and [offsetDate] are used for pagination.
-  /// [limit] is the maximum number of messages to retrieve.
   Future<dynamic> getChatHistory(
     t.InputPeerBase peer, {
     int offsetId = 0,
@@ -295,5 +314,25 @@ final class TeliDemoClient {
       minId: minId,
       hash: 0,
     );
+  }
+
+  /// Closes the connection and releases resources.
+  ///
+  /// This method saves the latest authorization state (including any updated
+  /// server salts) to [credentials.sessionData] before closing the network socket.
+  Future<void> close() async {
+    print('[Client] Shutting down client and saving local state...');
+    
+    // Capture the latest state from the raw client before it's cleared
+    final raw = _client;
+    if (raw != null) {
+      credentials.sessionData = jsonEncode(raw.authorizationKey.toJson());
+    }
+
+    await _teliSocket?.close();
+    await _updateController.close();
+    _client = null;
+    _teliSocket = null;
+    print('[Client] Client shutdown complete.');
   }
 }

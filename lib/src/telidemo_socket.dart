@@ -26,6 +26,8 @@ class TeliDemoSocket extends tg.SocketAbstraction {
 
   /// Closes the underlying socket.
   Future<void> close() async {
+    print('[Socket] Closing network connection...');
     await socket.close();
+    print('[Socket] Network connection closed.');
   }
 }
