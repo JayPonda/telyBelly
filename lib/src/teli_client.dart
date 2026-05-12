@@ -381,6 +381,14 @@ class TeliClient {
     return result;
   }
 
+  Future<t.InputCheckPasswordSRPBase> check2FA(
+    t.AccountPassword accountPassword,
+    String password,
+  ) async {
+    return tg.check2FA(accountPassword, password);
+  }
+
+
   /// Closes the connection and releases resources.
   Future<void> close() async {
     print('[Client] Shutting down client...');
