@@ -1,0 +1,270 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:t/t.dart' as t;
+import 'package:tg/tg.dart' as tg;
+
+import 'socket.dart';
+import '../models/models.dart';
+
+/// A high-level Telegram client for executing API methods.
+class TeliClient {
+  tg.Client? _client;
+  TeliSocket? _teliSocket;
+  StreamSubscription<dynamic>? _streamSubscription;
+  final TeliCredentials credentials;
+  final StreamController<dynamic> _updateController =
+      StreamController<dynamic>.broadcast();
+
+  TeliClient(this.credentials);
+
+  tg.Client? get rawClient => _client;
+
+  Future<void> connect({
+    String? ip,
+    int? port,
+    int? dcId,
+  }) async {
+    final host = credentials.getHost();
+    ip ??= host.ip;
+    port ??= host.port;
+    dcId ??= host.dcId;
+
+    final sessionData = credentials.sessionData;
+    if (sessionData == null || sessionData.isEmpty) {
+      throw StateError('No session data found. Call TeliAuth.login() first.');
+    }
+
+    credentials.validateApiCredentials();
+
+    final socket = await Socket.connect(ip, port);
+    _teliSocket = TeliSocket(socket);
+    final obfuscation = tg.Obfuscation.random(false, dcId);
+    final idGenerator = tg.MessageIdGenerator();
+
+    await _teliSocket!.send(obfuscation.preamble);
+
+    final authKey = tg.AuthorizationKey.fromJson(
+      jsonDecode(sessionData) as Map<String, dynamic>,
+    );
+
+    _client = tg.Client(
+      socket: _teliSocket!,
+      obfuscation: obfuscation,
+      authorizationKey: authKey,
+      idGenerator: idGenerator,
+    );
+
+    _streamSubscription = _client!.stream.listen((event) {
+      if (!_updateController.isClosed) {
+        _updateController.add(event);
+      }
+    });
+
+    await _client!.initConnection<t.Config>(
+      apiId: credentials.apiId,
+      deviceModel: 'Desktop',
+      systemVersion: 'Unknown',
+      appVersion: '1.0.0',
+      systemLangCode: 'en',
+      langPack: '',
+      langCode: 'en',
+      query: const t.HelpGetConfig(),
+    );
+  }
+
+  void onUpdate(FutureOr<void> Function(dynamic data) callback) {
+    _updateController.stream.listen((data) async {
+      await callback(data);
+    });
+  }
+
+  Future<t.TlObject?> invoke(t.TlMethod method) async {
+    final client = _client;
+    if (client == null) throw StateError('Client not connected.');
+    final response = await client.invoke(method);
+    if (response.error != null) throw Exception(response.error!.errorMessage);
+    return response.result;
+  }
+
+  Future<List<TeliChannel>> getSubscribedChannels({
+    int limit = 100,
+  }) async {
+    final result = await invoke(
+      t.MessagesGetDialogs(
+        excludePinned: false,
+        offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+        offsetId: 0,
+        offsetPeer: const t.InputPeerEmpty(),
+        limit: limit,
+        hash: 0,
+      ),
+    );
+
+    if (result is t.MessagesDialogsBase) {
+      final chats = switch (result) {
+        t.MessagesDialogs d => d.chats,
+        t.MessagesDialogsSlice d => d.chats,
+        t.MessagesDialogsNotModified _ => <t.ChatBase>[],
+        _ => <t.ChatBase>[],
+      };
+      return chats.map((c) => TeliChannel.fromRaw(c)).toList();
+    }
+    return [];
+  }
+
+  Future<List<TeliMessage>> getMessages(
+    TeliChannel channel, {
+    int limit = 20,
+    int offsetId = 0,
+  }) async {
+    final peer = _getPeer(channel);
+    final result = await invoke(
+      t.MessagesGetHistory(
+        peer: peer,
+        offsetId: offsetId,
+        offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+        addOffset: 0,
+        limit: limit,
+        maxId: 0,
+        minId: 0,
+        hash: 0,
+      ),
+    );
+
+    if (result is t.MessagesMessagesBase) {
+      final messages = switch (result) {
+        t.MessagesMessages m => m.messages,
+        t.MessagesMessagesSlice m => m.messages,
+        t.MessagesChannelMessages m => m.messages,
+        t.MessagesMessagesNotModified _ => <t.MessageBase>[],
+        _ => <t.MessageBase>[],
+      };
+      return messages.map((m) => TeliMessage.fromRaw(m)).toList();
+    }
+    return [];
+  }
+
+  Stream<List<TeliMessage>> getMessagesByTimeRange(
+    TeliChannel channel, {
+    DateTime? startDate,
+    DateTime? endDate,
+  }) async* {
+    final end = endDate ?? DateTime.now();
+    final start = startDate ?? end.subtract(const Duration(hours: 24));
+    final peer = _getPeer(channel);
+    yield* _fetchPaginatedMessagesStream(peer, start: start, end: end);
+  }
+
+  Stream<List<TeliMessage>> getMessagesUntil(
+    TeliChannel channel, {
+    required int lastMessageId,
+  }) async* {
+    final peer = _getPeer(channel);
+    yield* _fetchPaginatedMessagesStream(
+      peer,
+      end: DateTime.now(),
+      stopAtId: lastMessageId,
+    );
+  }
+
+  t.InputPeerBase _getPeer(TeliChannel channel) {
+    if (channel.isForbidden) {
+      throw Exception('Cannot access a forbidden or deleted chat: ${channel.title}');
+    }
+
+    if (channel.isChannel) {
+      return t.InputPeerChannel(
+        channelId: channel.id,
+        accessHash: channel.accessHash ?? 0,
+      );
+    } else {
+      return t.InputPeerChat(chatId: channel.id);
+    }
+  }
+
+  Stream<List<TeliMessage>> _fetchPaginatedMessagesStream(
+    t.InputPeerBase peer, {
+    DateTime? start,
+    required DateTime end,
+    int? stopAtId,
+  }) async* {
+    DateTime? cursorDate = end;
+    int? cursorId;
+
+    while (true) {
+      final result = await invoke(
+        t.MessagesGetHistory(
+          peer: peer,
+          offsetId: cursorId ?? 0,
+          offsetDate: cursorDate ?? end,
+          addOffset: 0,
+          limit: 100,
+          maxId: 0,
+          minId: 0,
+          hash: 0,
+        ),
+      );
+
+      if (result is! t.MessagesMessagesBase) break;
+
+      final batch = switch (result) {
+        t.MessagesMessages m => m.messages,
+        t.MessagesMessagesSlice m => m.messages,
+        t.MessagesChannelMessages m => m.messages,
+        t.MessagesMessagesNotModified _ => <t.MessageBase>[],
+        _ => <t.MessageBase>[],
+      };
+
+      if (batch.isEmpty) break;
+
+      final filtered = <TeliMessage>[];
+      DateTime? oldestDate;
+      int? oldestId;
+      bool reachedStop = false;
+
+      for (final raw in batch) {
+        final msg = TeliMessage.fromRaw(raw);
+
+        if (stopAtId != null && msg.id == stopAtId) {
+          reachedStop = true;
+          break;
+        }
+
+        if (start != null &&
+            (msg.date.isBefore(start) || msg.date.isAtSameMomentAs(start))) {
+          reachedStop = true;
+          break;
+        }
+
+        filtered.add(msg);
+        if (oldestDate == null || msg.date.isBefore(oldestDate)) {
+          oldestDate = msg.date;
+          oldestId = msg.id;
+        }
+      }
+
+      if (filtered.isNotEmpty) yield filtered;
+      if (reachedStop || batch.length < 100 || oldestDate == null) break;
+
+      cursorDate = oldestDate;
+      cursorId = oldestId;
+    }
+  }
+
+  Future<void> logout() async {
+    await invoke(const t.AuthLogOut());
+    credentials.sessionData = null;
+    await close();
+  }
+
+  Future<void> close() async {
+    await _streamSubscription?.cancel();
+    await _teliSocket?.close();
+    await _updateController.close();
+    _client = null;
+    _teliSocket = null;
+    _streamSubscription = null;
+  }
+}

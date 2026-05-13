@@ -1,0 +1,229 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:t/t.dart' as t;
+import 'package:tg/tg.dart' as tg;
+
+import '../models/models.dart';
+import 'socket.dart';
+
+/// Handles the Telegram authentication lifecycle using a state-machine approach.
+final class TeliAuth {
+  tg.Client? _client;
+  TeliSocket? _teliSocket;
+  final TeliCredentials credentials;
+
+  TeliAuth(this.credentials);
+
+  /// Initializes the connection and attempts to resume session or start login.
+  Future<TeliAuthState> login({String? ip, int? port, int? dcId}) async {
+    try {
+      final host = credentials.getHost();
+      ip ??= host.ip;
+      port ??= host.port;
+      dcId ??= host.dcId;
+
+      credentials.validateApiCredentials();
+
+      final socket = await Socket.connect(ip, port);
+      _teliSocket = TeliSocket(socket);
+      final obfuscation = tg.Obfuscation.random(false, dcId);
+      final idGenerator = tg.MessageIdGenerator();
+
+      await _teliSocket!.send(obfuscation.preamble);
+
+      tg.AuthorizationKey? authKey;
+      final sessionData = credentials.sessionData;
+      if (sessionData != null && sessionData.isNotEmpty) {
+        try {
+          authKey = tg.AuthorizationKey.fromJson(
+            jsonDecode(sessionData) as Map<String, dynamic>,
+          );
+        } catch (_) {}
+      }
+
+      if (authKey == null) {
+        authKey = await tg.Client.authorize(
+          _teliSocket!,
+          obfuscation,
+          idGenerator,
+        );
+        credentials.sessionData = jsonEncode(authKey.toJson());
+      }
+
+      _client = tg.Client(
+        socket: _teliSocket!,
+        obfuscation: obfuscation,
+        authorizationKey: authKey,
+        idGenerator: idGenerator,
+      );
+
+      await _client!.initConnection<t.Config>(
+        apiId: credentials.apiId,
+        deviceModel: 'Desktop',
+        systemVersion: 'Unknown',
+        appVersion: '1.0.0',
+        systemLangCode: 'en',
+        langPack: '',
+        langCode: 'en',
+        query: const t.HelpGetConfig(),
+      );
+
+      try {
+        final userResponse = await _client!.users.getUsers(
+          id: [const t.InputUserSelf()],
+        );
+        if (userResponse.result is t.Vector &&
+            (userResponse.result as t.Vector).items.isNotEmpty) {
+          final result = TeliAuthSuccess(
+            credentials,
+            rawData: userResponse.result,
+          );
+          await dispose();
+          return result;
+        }
+      } catch (e) {
+        if (e.toString().contains('AUTH_KEY_UNREGISTERED') ||
+            e.toString().contains('AUTH_RESTART')) {
+          credentials.sessionData = null;
+          await dispose();
+          return login(ip: ip, port: port, dcId: dcId);
+        }
+      }
+
+      return await _sendCode();
+    } catch (e) {
+      await dispose();
+      return TeliAuthError(e.toString());
+    }
+  }
+
+  Future<TeliAuthState> _sendCode() async {
+    try {
+      final fullPhone = credentials.validatePhoneNumber();
+
+      final response = await _client!.auth.sendCode(
+        phoneNumber: fullPhone,
+        apiId: credentials.apiId,
+        apiHash: credentials.apiHash,
+        settings: const t.CodeSettings(
+          allowFlashcall: false,
+          currentNumber: true,
+          allowAppHash: false,
+          allowMissedCall: false,
+          allowFirebase: false,
+          unknownNumber: false,
+        ),
+      );
+
+      if (response.error != null) {
+        final err = TeliAuthError(response.error!.errorMessage);
+        await dispose();
+        return err;
+      }
+
+      final sentCode = response.result as t.AuthSentCode;
+      credentials.phoneCodeHash = sentCode.phoneCodeHash;
+
+      return const TeliAuthWaitOtp();
+    } catch (e) {
+      await dispose();
+      return TeliAuthError(e.toString());
+    }
+  }
+
+  /// Submits the OTP code received by the user.
+  Future<TeliAuthState> submitOtp(String code) async {
+    if (_client == null) return const TeliAuthError('Client not initialized.');
+
+    try {
+      final fullPhone = credentials.validatePhoneNumber();
+      final signInResponse = await _client!.auth.signIn(
+        phoneNumber: fullPhone,
+        phoneCodeHash: credentials.phoneCodeHash!,
+        phoneCode: code,
+      );
+
+      if (signInResponse.error != null) {
+        if (signInResponse.error!.errorMessage == 'SESSION_PASSWORD_NEEDED') {
+          return await _get2faState();
+        }
+        final err = TeliAuthError(signInResponse.error!.errorMessage);
+        await dispose();
+        return err;
+      }
+
+      credentials.sessionData = jsonEncode(_client!.authorizationKey.toJson());
+      final result = TeliAuthSuccess(
+        credentials,
+        rawData: signInResponse.result,
+      );
+      await dispose();
+      return result;
+    } catch (e) {
+      await dispose();
+      return TeliAuthError(e.toString());
+    }
+  }
+
+  Future<TeliAuthState> _get2faState() async {
+    try {
+      final response = await _client!.account.getPassword();
+      if (response.result is t.AccountPassword) {
+        final pwd = response.result as t.AccountPassword;
+        return TeliAuthWaitPassword(pwd.hint ?? '');
+      }
+      final err = const TeliAuthError('Failed to retrieve 2FA details.');
+      await dispose();
+      return err;
+    } catch (e) {
+      await dispose();
+      return TeliAuthError(e.toString());
+    }
+  }
+
+  /// Submits the 2FA password.
+  Future<TeliAuthState> submitPassword(String password) async {
+    if (_client == null) return const TeliAuthError('Client not initialized.');
+
+    try {
+      final response = await _client!.account.getPassword();
+      if (response.result is! t.AccountPassword) {
+        final err = const TeliAuthError('Failed to retrieve 2FA details.');
+        await dispose();
+        return err;
+      }
+
+      final accountPassword = response.result as t.AccountPassword;
+      final srp = await tg.check2FA(accountPassword, password);
+      final checkPasswordResponse = await _client!.auth.checkPassword(
+        password: srp,
+      );
+
+      if (checkPasswordResponse.error != null) {
+        final err = TeliAuthError(checkPasswordResponse.error!.errorMessage);
+        await dispose();
+        return err;
+      }
+
+      credentials.sessionData = jsonEncode(_client!.authorizationKey.toJson());
+      final result = TeliAuthSuccess(
+        credentials,
+        rawData: checkPasswordResponse.result,
+      );
+      await dispose();
+      return result;
+    } catch (e) {
+      await dispose();
+      return TeliAuthError(e.toString());
+    }
+  }
+
+  /// Closes the underlying connection.
+  Future<void> dispose() async {
+    await _teliSocket?.close();
+    _client = null;
+    _teliSocket = null;
+  }
+}

@@ -1,6 +1,6 @@
-name: telidemo
-description: A starting point for Dart libraries or applications.
-version: 1.0.0
+name: telissy
+description: A high-level, resource-oriented Telegram client library for Dart.
+version: 1.1.0
 # repository: https://github.com/my_org/my_repo
 
 environment:
@@ -13,5 +13,6 @@ dependencies:
   meta: ^1.18.2
 
 dev_dependencies:
+  coverage: ^1.15.0
   lints: ^6.0.0
   test: ^1.25.6

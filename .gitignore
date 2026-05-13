@@ -9,4 +9,5 @@ pubspec.lock
 .agents
 tg
 t
+coverage
 session.json
