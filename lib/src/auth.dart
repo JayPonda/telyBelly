@@ -14,7 +14,9 @@ final class TeliAuth {
   TeliSocket? _teliSocket;
   final TeliCredentials credentials;
 
-  TeliAuth(this.credentials);
+  TeliAuth(this.credentials, {tg.Client? client, TeliSocket? teliSocket})
+      : _client = client,
+        _teliSocket = teliSocket;
 
   /// Initializes the connection and attempts to resume session or start login.
   Future<TeliAuthState> login({String? ip, int? port, int? dcId}) async {
@@ -26,54 +28,60 @@ final class TeliAuth {
 
       credentials.validateApiCredentials();
 
-      final socket = await Socket.connect(ip, port);
-      _teliSocket = TeliSocket(socket);
+      if (_teliSocket == null) {
+        final socket = await Socket.connect(ip, port);
+        _teliSocket = TeliSocket(socket);
+      }
+      
       final obfuscation = tg.Obfuscation.random(false, dcId);
       final idGenerator = tg.MessageIdGenerator();
 
-      await _teliSocket!.send(obfuscation.preamble);
+      if (_client == null) {
+        await _teliSocket!.send(obfuscation.preamble);
 
-      tg.AuthorizationKey? authKey;
-      final sessionData = credentials.sessionData;
-      if (sessionData != null && sessionData.isNotEmpty) {
-        try {
-          authKey = tg.AuthorizationKey.fromJson(
-            jsonDecode(sessionData) as Map<String, dynamic>,
+        tg.AuthorizationKey? authKey;
+        final sessionData = credentials.sessionData;
+        if (sessionData != null && sessionData.isNotEmpty) {
+          try {
+            authKey = tg.AuthorizationKey.fromJson(
+              jsonDecode(sessionData) as Map<String, dynamic>,
+            );
+          } catch (_) {}
+        }
+
+        if (authKey == null) {
+          authKey = await tg.Client.authorize(
+            _teliSocket!,
+            obfuscation,
+            idGenerator,
           );
-        } catch (_) {}
-      }
+          credentials.sessionData = jsonEncode(authKey.toJson());
+        }
 
-      if (authKey == null) {
-        authKey = await tg.Client.authorize(
-          _teliSocket!,
-          obfuscation,
-          idGenerator,
+        _client = tg.Client(
+          socket: _teliSocket!,
+          obfuscation: obfuscation,
+          authorizationKey: authKey,
+          idGenerator: idGenerator,
         );
-        credentials.sessionData = jsonEncode(authKey.toJson());
+
+        await _client!.initConnection<t.Config>(
+          apiId: credentials.apiId,
+          deviceModel: 'Desktop',
+          systemVersion: 'Unknown',
+          appVersion: '1.0.0',
+          systemLangCode: 'en',
+          langPack: '',
+          langCode: 'en',
+          query: const t.HelpGetConfig(),
+        );
       }
-
-      _client = tg.Client(
-        socket: _teliSocket!,
-        obfuscation: obfuscation,
-        authorizationKey: authKey,
-        idGenerator: idGenerator,
-      );
-
-      await _client!.initConnection<t.Config>(
-        apiId: credentials.apiId,
-        deviceModel: 'Desktop',
-        systemVersion: 'Unknown',
-        appVersion: '1.0.0',
-        systemLangCode: 'en',
-        langPack: '',
-        langCode: 'en',
-        query: const t.HelpGetConfig(),
-      );
 
       try {
         final userResponse = await _client!.users.getUsers(
           id: [const t.InputUserSelf()],
         );
+        print('UserResponse result: ${userResponse.result.runtimeType}');
         if (userResponse.result is t.Vector &&
             (userResponse.result as t.Vector).items.isNotEmpty) {
           final result = TeliAuthSuccess(

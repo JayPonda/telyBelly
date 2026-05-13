@@ -117,7 +117,9 @@ void main() async {
     print('[Data] Found ${channels.length} chats:');
     for (var i = 0; i < channels.length; i++) {
       final c = channels[i];
-      final type = c.isBroadcast ? 'Channel' : (c.isChannel ? 'Supergroup' : 'Chat');
+      final type = c.isBroadcast
+          ? 'Channel'
+          : (c.isChannel ? 'Supergroup' : 'Chat');
       final forbidden = c.isForbidden ? ' [FORBIDDEN]' : '';
       print('  [$i] $type: ${c.title}$forbidden');
     }
@@ -143,22 +145,47 @@ void main() async {
           stdout.write('\nSelect fetch mode:\n');
           stdout.write('  1 - Time range (Stream)\n');
           stdout.write('  2 - Until message (Stream)\n');
-          stdout.write('  3 - Latest 5 messages (Simple)\n');
+          stdout.write('  3 - Latest n messages (Simple)\n');
           stdout.write('Enter choice: ');
           final modeInput = stdin.readLineSync();
 
           if (modeInput == '1') {
-            print('\n[Action] Fetching by time range (last 24h) via Stream...');
-            final stream = client.getMessagesByTimeRange(selectedChannel);
+            stdout.write('Enter start date (yyyy-MM-dd): ');
+            final startInput = stdin.readLineSync() ?? '';
+            stdout.write('Enter end date (yyyy-MM-dd): ');
+            final endInput = stdin.readLineSync() ?? '';
+
+            DateTime? startDate;
+            DateTime? endDate;
+            try {
+              if (startInput.isNotEmpty) {
+                startDate = DateTime.parse('${startInput}T00:00:00');
+              }
+              if (endInput.isNotEmpty) {
+                endDate = DateTime.parse('${endInput}T23:59:59');
+              }
+            } catch (_) {
+              print('[Error] Invalid date format. Use yyyy-MM-dd.');
+              return;
+            }
+
+            print('\n[Action] Fetching by time range via Stream...');
+            final stream = client.getMessagesByTimeRange(
+              selectedChannel,
+              startDate: startDate,
+              endDate: endDate,
+            );
             bool found = false;
             await for (final batch in stream) {
               found = true;
               print('--- Received Batch (${batch.length} messages) ---');
               for (final msg in batch) {
-                print('  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}');
+                print(
+                  '  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}',
+                );
               }
             }
-            if (!found) print('[Info] No messages found in the last 24h.');
+            if (!found) print('[Info] No messages found in the given range.');
           } else if (modeInput == '2') {
             stdout.write('Enter message ID to stop at: ');
             final idInput = stdin.readLineSync();
@@ -167,26 +194,47 @@ void main() async {
               print('[Error] Valid message ID required.');
             } else {
               print('\n[Action] Fetching until ID $lastId via Stream...');
-              final stream = client.getMessagesUntil(selectedChannel, lastMessageId: lastId);
+              final stream = client.getMessagesUntil(
+                selectedChannel,
+                lastMessageId: lastId,
+              );
               bool found = false;
               await for (final batch in stream) {
                 found = true;
                 print('--- Received Batch (${batch.length} messages) ---');
                 for (final msg in batch) {
-                  print('  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}');
+                  print(
+                    '  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}',
+                  );
                 }
               }
               if (!found) print('[Info] No messages found until ID $lastId.');
             }
           } else {
-            print('\n[Action] Fetching latest 5 messages...');
-            final messages = await client.getMessages(selectedChannel, limit: 5);
-            if (messages.isEmpty) {
+            stdout.write('Enter number of latest messages to fetch: ');
+            final nInput = stdin.readLineSync() ?? '';
+            final n = int.tryParse(nInput) ?? 5;
+            print('\n[Action] Fetching latest $n messages via Stream...');
+            final stream = client.getMessagesStream(
+              selectedChannel,
+              limit: n,
+            );
+            int totalCount = 0;
+            bool found = false;
+            await for (final batch in stream) {
+              found = true;
+              totalCount += batch.length;
+              print('--- Received Batch (${batch.length} messages) ---');
+              for (final msg in batch) {
+                print(
+                  '  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}',
+                );
+              }
+            }
+            if (!found) {
               print('[Info] No messages found.');
             } else {
-              for (final msg in messages) {
-                print('  [ID: ${msg.id}] [${msg.date}] ${msg.text ?? "Service Message"}');
-              }
+              print('--- Total: $totalCount messages ---');
             }
           }
         }

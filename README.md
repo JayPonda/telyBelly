@@ -78,15 +78,30 @@ for (var channel in channels) {
 
 For large message histories, `telissy` uses Streams to ensure your application remains responsive and uses minimal memory.
 
-#### Option A: Latest N Messages (Simple)
+#### Option A: Latest N Messages (Paginated)
 
-Best for quickly displaying the most recent activity.
+Best for quickly displaying the most recent activity. Fetches results in pages of up to 100, returning a single list.
 
 ```dart
-final messages = await client.getMessages(selectedChannel, limit: 20);
+final messages = await client.getMessages(selectedChannel, limit: 150);
 ```
 
-#### Option B: Time Range (Stream)
+#### Option B: Latest N Messages (Stream)
+
+Memory-efficient streaming version of Option A. Yields batches as they arrive without loading everything at once.
+
+```dart
+final stream = client.getMessagesStream(
+  selectedChannel,
+  limit: 150,
+);
+
+await for (final batch in stream) {
+  print('Chunk: ${batch.length} messages');
+}
+```
+
+#### Option C: Time Range (Stream)
 
 Best for historical processing or search. Defaults to last 24h if dates are omitted.
 
@@ -102,7 +117,7 @@ await for (final batch in stream) {
 }
 ```
 
-#### Option C: Until Message ID (Stream)
+#### Option D: Until Message ID (Stream)
 
 Best for syncing databases or "catching up" to where you last left off.
 

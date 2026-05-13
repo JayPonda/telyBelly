@@ -34,11 +34,38 @@ void main() {
       expect(host.ip, equals('91.108.56.130'));
     });
 
-    test('setters work as expected', () {
+    test('getHost returns correct DC for USA', () {
+      final creds = TeliCredentials(
+        apiId: 1234567,
+        apiHash: 'a' * 32,
+        countryCode: '1',
+      );
+      final host = creds.getHost();
+      expect(host.dcId, equals(1));
+    });
+
+    test('getHost returns correct DC for UK', () {
+      final creds = TeliCredentials(
+        apiId: 1234567,
+        apiHash: 'a' * 32,
+        countryCode: '44',
+      );
+      final host = creds.getHost();
+      expect(host.dcId, equals(2));
+    });
+
+    test('validatePhoneNumber throws on empty country code', () {
       final creds = TeliCredentials(apiId: 1234567, apiHash: 'a' * 32);
-      creds.countryCode = '1';
-      creds.phoneNumber = '5551234567';
-      expect(creds.fullPhoneNumber, equals('+15551234567'));
+      expect(() => creds.validatePhoneNumber(), throwsArgumentError);
+    });
+
+    test('validatePhoneNumber throws on empty phone number', () {
+      final creds = TeliCredentials(
+        apiId: 1234567,
+        apiHash: 'a' * 32,
+        countryCode: '1',
+      );
+      expect(() => creds.validatePhoneNumber(), throwsArgumentError);
     });
   });
 }

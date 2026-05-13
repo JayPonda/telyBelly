@@ -17,7 +17,9 @@ class TeliClient {
   final StreamController<dynamic> _updateController =
       StreamController<dynamic>.broadcast();
 
-  TeliClient(this.credentials);
+  TeliClient(this.credentials, {tg.Client? client, TeliSocket? teliSocket})
+      : _client = client,
+        _teliSocket = teliSocket;
 
   tg.Client? get rawClient => _client;
 
@@ -38,40 +40,45 @@ class TeliClient {
 
     credentials.validateApiCredentials();
 
-    final socket = await Socket.connect(ip, port);
-    _teliSocket = TeliSocket(socket);
+    if (_teliSocket == null) {
+      final socket = await Socket.connect(ip, port);
+      _teliSocket = TeliSocket(socket);
+    }
+    
     final obfuscation = tg.Obfuscation.random(false, dcId);
     final idGenerator = tg.MessageIdGenerator();
 
-    await _teliSocket!.send(obfuscation.preamble);
+    if (_client == null) {
+      await _teliSocket!.send(obfuscation.preamble);
 
-    final authKey = tg.AuthorizationKey.fromJson(
-      jsonDecode(sessionData) as Map<String, dynamic>,
-    );
+      final authKey = tg.AuthorizationKey.fromJson(
+        jsonDecode(sessionData) as Map<String, dynamic>,
+      );
 
-    _client = tg.Client(
-      socket: _teliSocket!,
-      obfuscation: obfuscation,
-      authorizationKey: authKey,
-      idGenerator: idGenerator,
-    );
+      _client = tg.Client(
+        socket: _teliSocket!,
+        obfuscation: obfuscation,
+        authorizationKey: authKey,
+        idGenerator: idGenerator,
+      );
 
-    _streamSubscription = _client!.stream.listen((event) {
+      await _client!.initConnection<t.Config>(
+        apiId: credentials.apiId,
+        deviceModel: 'Desktop',
+        systemVersion: 'Unknown',
+        appVersion: '1.0.0',
+        systemLangCode: 'en',
+        langPack: '',
+        langCode: 'en',
+        query: const t.HelpGetConfig(),
+      );
+    }
+
+    _streamSubscription ??= _client!.stream.listen((event) {
       if (!_updateController.isClosed) {
         _updateController.add(event);
       }
     });
-
-    await _client!.initConnection<t.Config>(
-      apiId: credentials.apiId,
-      deviceModel: 'Desktop',
-      systemVersion: 'Unknown',
-      appVersion: '1.0.0',
-      systemLangCode: 'en',
-      langPack: '',
-      langCode: 'en',
-      query: const t.HelpGetConfig(),
-    );
   }
 
   void onUpdate(FutureOr<void> Function(dynamic data) callback) {
@@ -120,20 +127,28 @@ class TeliClient {
     int offsetId = 0,
   }) async {
     final peer = _getPeer(channel);
-    final result = await invoke(
-      t.MessagesGetHistory(
-        peer: peer,
-        offsetId: offsetId,
-        offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
-        addOffset: 0,
-        limit: limit,
-        maxId: 0,
-        minId: 0,
-        hash: 0,
-      ),
-    );
+    final allMessages = <TeliMessage>[];
+    int currentOffsetId = offsetId;
 
-    if (result is t.MessagesMessagesBase) {
+    while (allMessages.length < limit) {
+      final remaining = limit - allMessages.length;
+      final pageLimit = remaining < 100 ? remaining : 100;
+
+      final result = await invoke(
+        t.MessagesGetHistory(
+          peer: peer,
+          offsetId: currentOffsetId,
+          offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+          addOffset: 0,
+          limit: pageLimit,
+          maxId: 0,
+          minId: 0,
+          hash: 0,
+        ),
+      );
+
+      if (result is! t.MessagesMessagesBase) break;
+
       final messages = switch (result) {
         t.MessagesMessages m => m.messages,
         t.MessagesMessagesSlice m => m.messages,
@@ -141,9 +156,65 @@ class TeliClient {
         t.MessagesMessagesNotModified _ => <t.MessageBase>[],
         _ => <t.MessageBase>[],
       };
-      return messages.map((m) => TeliMessage.fromRaw(m)).toList();
+
+      if (messages.isEmpty) break;
+
+      final converted = messages.map((m) => TeliMessage.fromRaw(m)).toList();
+      allMessages.addAll(converted);
+
+      if (messages.length < pageLimit) break;
+
+      currentOffsetId = converted.last.id;
     }
-    return [];
+
+    return allMessages;
+  }
+
+  Stream<List<TeliMessage>> getMessagesStream(
+    TeliChannel channel, {
+    int limit = 20,
+    int offsetId = 0,
+  }) async* {
+    final peer = _getPeer(channel);
+    int currentOffsetId = offsetId;
+    int remaining = limit;
+
+    while (remaining > 0) {
+      final pageLimit = remaining < 100 ? remaining : 100;
+
+      final result = await invoke(
+        t.MessagesGetHistory(
+          peer: peer,
+          offsetId: currentOffsetId,
+          offsetDate: DateTime.fromMillisecondsSinceEpoch(0),
+          addOffset: 0,
+          limit: pageLimit,
+          maxId: 0,
+          minId: 0,
+          hash: 0,
+        ),
+      );
+
+      if (result is! t.MessagesMessagesBase) break;
+
+      final messages = switch (result) {
+        t.MessagesMessages m => m.messages,
+        t.MessagesMessagesSlice m => m.messages,
+        t.MessagesChannelMessages m => m.messages,
+        t.MessagesMessagesNotModified _ => <t.MessageBase>[],
+        _ => <t.MessageBase>[],
+      };
+
+      if (messages.isEmpty) break;
+
+      final batch =
+          messages.map((m) => TeliMessage.fromRaw(m)).toList();
+      yield batch;
+      remaining -= batch.length;
+
+      if (messages.length < pageLimit) break;
+      currentOffsetId = batch.last.id;
+    }
   }
 
   Stream<List<TeliMessage>> getMessagesByTimeRange(
